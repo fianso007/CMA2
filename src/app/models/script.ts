@@ -1,3 +1,5 @@
+import { VoiceSettings } from "./character-mapping";
+
 export interface ScriptLine {
   id: string;
   type: 'DIALOGUE' | 'NARRATION' | 'ACTION';

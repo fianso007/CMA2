@@ -34,6 +34,7 @@ export class ScriptProcessorComponent implements OnInit {
       this.characters = characters;
     });
   }
+  
 
   onFileSelected(event: any) {
     const file = event.target.files[0];
@@ -202,7 +203,7 @@ export class ScriptProcessorComponent implements OnInit {
         const audioBlob = await this.textToAudioBlob(
           this.scriptLines[i],
           character.voiceSettings,
-          format
+          
         );
         
         if (audioBlob) {
@@ -231,57 +232,159 @@ export class ScriptProcessorComponent implements OnInit {
     }
   }
 
-  private async textToAudioBlob(text: string, voiceSettings: any, format: 'mp3' | 'wav'): Promise<Blob | null> {
-    return new Promise((resolve) => {
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.pitch = voiceSettings.pitch;
-      utterance.rate = voiceSettings.rate;
-      utterance.volume = voiceSettings.volume;
+  // private async textToAudioBlob(text: string, voiceSettings: any, format: 'mp3' | 'wav'): Promise<Blob | null> {
+  //   return new Promise((resolve) => {
+  //     const utterance = new SpeechSynthesisUtterance(text);
+  //     utterance.pitch = voiceSettings.pitch;
+  //     utterance.rate = voiceSettings.rate;
+  //     utterance.volume = voiceSettings.volume;
 
-      const voices = this.synth.getVoices();
-      const voice = voices.find(v => v.name === voiceSettings.voice);
-      if (voice) {
-        utterance.voice = voice;
-      }
+  //     const voices = this.synth.getVoices();
+  //     const voice = voices.find(v => v.name === voiceSettings.voice);
+  //     if (voice) {
+  //       utterance.voice = voice;
+  //     }
 
-      // Use audio worklet for recording
-      const audioCtx = new AudioContext();
-      const destination = audioCtx.createMediaStreamDestination();
-      const mimeType = format === 'mp3' ? 'audio/mpeg' : 'audio/wav';
-      const mediaRecorder = new MediaRecorder(destination.stream, {
-        mimeType: format === 'mp3' ? 'audio/webm;codecs=opus' : 'audio/webm;codecs=opus'
-      });
+  //     // Use audio worklet for recording
+  //     const audioCtx = new AudioContext();
+  //     const destination = audioCtx.createMediaStreamDestination();
+  //     const mimeType = format === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+  //     const mediaRecorder = new MediaRecorder(destination.stream, {
+  //       mimeType: format === 'mp3' ? 'audio/webm;codecs=opus' : 'audio/webm;codecs=opus'
+  //     });
       
-      const chunks: Blob[] = [];
+  //     const chunks: Blob[] = [];
 
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) {
-          chunks.push(e.data);
-        }
-      };
+  //     mediaRecorder.ondataavailable = (e) => {
+  //       if (e.data.size > 0) {
+  //         chunks.push(e.data);
+  //       }
+  //     };
 
-      mediaRecorder.onstop = async () => {
-        const blob = new Blob(chunks, { type: 'audio/webm' });
+  //     mediaRecorder.onstop = async () => {
+  //       const blob = new Blob(chunks, { type: 'audio/webm' });
         
-        if (format === 'mp3') {
-          // Convert to MP3 using FFmpeg.js or similar library
-          // Note: This is a simplified version, you might want to add proper MP3 conversion
-          resolve(blob);
-        } else {
-          resolve(blob);
-        }
+  //       if (format === 'mp3') {
+  //         // Convert to MP3 using FFmpeg.js or similar library
+  //         // Note: This is a simplified version, you might want to add proper MP3 conversion
+  //         resolve(blob);
+  //       } else {
+  //         resolve(blob);
+  //       }
         
-        audioCtx.close();
-      };
+  //       audioCtx.close();
+  //     };
 
-      mediaRecorder.start();
+  //     mediaRecorder.start();
 
-      utterance.onend = () => {
-        mediaRecorder.stop();
-      };
+  //     utterance.onend = () => {
+  //       mediaRecorder.stop();
+  //     };
 
-      this.synth.speak(utterance);
+  //     this.synth.speak(utterance);
+  //   });
+  // }
+
+
+  private async setupAudioWorklet(): Promise<AudioWorkletNode> {
+    const audioContext = new AudioContext();
+    await audioContext.audioWorklet.addModule('assets/audioCapture.worklet.js');
+    return new AudioWorkletNode(audioContext, 'audio-capture-processor');
+  }
+
+  private async textToAudioBlob(text: string, voiceSettings: any): Promise<Blob> {
+    return new Promise(async (resolve) => {
+      try {
+        const audioContext = new AudioContext();
+        const workletNode = await this.setupAudioWorklet();
+        const chunks: Float32Array[] = [];
+
+        // Connect speech synthesis to audio worklet
+        const sourceNode = audioContext.createMediaStreamSource(await audioContext.createMediaStreamDestination().stream);
+        sourceNode.connect(workletNode);
+        workletNode.connect(audioContext.destination);
+
+        // Collect audio data from worklet
+        workletNode.port.onmessage = (event) => {
+          if (event.data.samples) {
+            chunks.push(new Float32Array(event.data.samples));
+          }
+        };
+
+        // Create and configure utterance
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.pitch = voiceSettings.pitch;
+        utterance.rate = voiceSettings.rate;
+        utterance.volume = voiceSettings.volume;
+
+        const voices = this.synth.getVoices();
+        const voice = voices.find(v => v.name === voiceSettings.voice);
+        if (voice) {
+          utterance.voice = voice;
+        }
+
+        // Handle speech end
+        utterance.onend = () => {
+          setTimeout(() => {
+            // Convert collected chunks to WAV format
+            const wavData = this.createWAVFile(chunks, audioContext.sampleRate);
+            const blob = new Blob([wavData], { type: 'audio/wav' });
+            resolve(blob);
+            audioContext.close();
+          }, 100);
+        };
+
+        // Start speech
+        this.synth.speak(utterance);
+      } catch (error) {
+        console.error('Audio capture error:', error);
+        resolve(new Blob([], { type: 'audio/wav' }));
+      }
     });
+  }
+
+  private createWAVFile(audioData: Float32Array[], sampleRate: number): ArrayBuffer {
+    const numChannels = 1;
+    const totalSamples = audioData.reduce((acc, curr) => acc + curr.length, 0);
+    
+    // WAV header calculation
+    const headerSize = 44;
+    const dataSize = totalSamples * 2; // 16-bit samples
+    const buffer = new ArrayBuffer(headerSize + dataSize);
+    const view = new DataView(buffer);
+
+    // Write WAV header
+    const writeString = (offset: number, string: string) => {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+      }
+    };
+
+    writeString(0, 'RIFF');                     // RIFF identifier
+    view.setUint32(4, 36 + dataSize, true);     // File size
+    writeString(8, 'WAVE');                     // WAVE identifier
+    writeString(12, 'fmt ');                    // Format chunk identifier
+    view.setUint32(16, 16, true);               // Format chunk length
+    view.setUint16(20, 1, true);                // Sample format (1 = PCM)
+    view.setUint16(22, numChannels, true);      // Number of channels
+    view.setUint32(24, sampleRate, true);       // Sample rate
+    view.setUint32(28, sampleRate * 2, true);   // Byte rate
+    view.setUint16(32, 2, true);                // Block align
+    view.setUint16(34, 16, true);               // Bits per sample
+    writeString(36, 'data');                    // Data chunk identifier
+    view.setUint32(40, dataSize, true);         // Data chunk length
+
+    // Write audio data
+    let offset = 44;
+    for (const chunk of audioData) {
+      for (let i = 0; i < chunk.length; i++) {
+        const sample = Math.max(-1, Math.min(1, chunk[i]));
+        view.setInt16(offset, sample * 0x7FFF, true);
+        offset += 2;
+      }
+    }
+
+    return buffer;
   }
 
   generateJson() {
